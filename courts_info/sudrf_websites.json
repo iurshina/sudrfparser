@@ -2283,8 +2283,7 @@
             "court_name": "Череповецкий городской суд (Вологодская область)",
             "court_website": "http://cherepoveckygor.vld.sudrf.ru",
             "srv": [
-                "1",
-                "2"
+                "1"
             ]
         },
         {
@@ -7297,9 +7296,7 @@
             "court_name": "Волоколамский городской суд (Московская область)",
             "court_website": "http://volokolamsk.mo.sudrf.ru",
             "srv": [
-                "1",
-                "2",
-                "3"
+                "1"
             ]
         },
         {
@@ -14014,7 +14011,7 @@
         {
             "court_id": "61RS0021",
             "court_name": "Сальский городской суд (Ростовская область)",
-            "court_website": "http://salsky.ros.sudrf.ru",
+            "court_website": "http://salskiy.ros.sudrf.ru",
             "srv": [
                 "1"
             ]
@@ -18583,7 +18580,7 @@
         {
             "court_id": "89RS0002",
             "court_name": "Лабытнангский городской суд (Ямало-Ненецкий автономный округ)",
-            "court_website": "http://priuralsky.ynao.sudrf.ru",
+            "court_website": "http://labytnangsky.ynao.sudrf.ru",
             "srv": [
                 "1"
             ]

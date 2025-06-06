@@ -17,9 +17,11 @@ from os import listdir
 from os.path import isfile, join
 from collections import Counter
 import gzip
+# for autocaptcha
+from twocaptcha import TwoCaptcha
 
 ###
-# Functions to parse criminal cases of the first instance from websites of federal courts of general jurisdiction hosted on sudrf.ru
+# Functions to parse criminal and administrative cases of the first instance from websites of federal courts of general jurisdiction hosted on sudrf.ru
 # Uses Chrome driver
 # Developed by Dataout.org
 # CC-BY-SA 4.0
@@ -50,6 +52,11 @@ def _set_browser(path_to_driver:str,imagesOff=False,javaScriptOff=False):
         prefs['profile.managed_default_content_settings.javascript'] = 2
 
     chrome_options.add_experimental_option("prefs", prefs)
+    ### ignoring certificate errors, allowing insecure content, disabling security checks
+    chrome_options.add_argument("--ignore-certificate-errors")
+    chrome_options.add_argument("--allow-running-insecure-content")
+    chrome_options.add_argument("--disable-web-security")
+    ###
 
     browser = webdriver.Chrome(executable_path=path_to_driver,options=chrome_options)
 
@@ -214,9 +221,11 @@ def _get_cases_ids_per_page_f1(soup) -> list:
         # taking only the first column
         first_cell = row.find("td")
         if first_cell != None:
-            case_link = first_cell.find("a")['href']
-            case_id_str = re.search('case_id=\d*&case_uid=.*&',case_link)[0].rstrip('&')
-            ids.append(case_id_str)
+            case_link_a = first_cell.find("a")
+            if case_link_a != None:
+                case_link = case_link_a['href']
+                case_id_str = re.search('case_id=\d*&case_uid=.*&',case_link)[0].rstrip('&')
+                ids.append(case_id_str)
             
     return ids
 
@@ -288,36 +297,43 @@ def _get_one_case_text_f1(soup) -> dict:
     return results
 
 
-def _get_autocaptcha(apikey:str,base64Image:str) -> str:
+def captcha_solver(config:dict,base64Image:str) -> str:
     '''
-    Getting the captcha value automatically using OCR API from https://ocr.space/OCRAPI
-    apikey: str, API key provided by https://ocr.space/OCRAPI;
+    Using a captcha rocognition server
+    config: dict, data necessery for captcha request;
     base64Image: str, captcha image data;
     Returns str
     '''
-
-    auto_captcha = ""
-
+    
+    guessed_captcha = ""
     img_data = f"data:image/jpeg;base64,{base64Image}"
+    
+    solver = TwoCaptcha(**config['config'])
+    
+    # try to get captcha 3 times
+    tries = 0
+    while tries < 3:
+        try:
+            result = solver.normal(img_data, numeric=config['numeric'],
+                                   minLen=config['minLen'],
+                                   maxLen=config['maxLen'],
+                                   phrase=config['phrase'])
+        except:
+            tries += 1
+            continue
+        else:
+            guessed_captcha = result['code']
+            break
+            
+    return guessed_captcha
 
-    params = {"apikey": apikey, "OCREngine":"2", "base64Image":img_data}
-    r = requests.post('https://api.ocr.space/parse/image',data=params)
-    parsed = r.json()
 
-    # parsed successfully
-    if parsed['IsErroredOnProcessing'] == False:
-        if parsed.get('ParsedResults') != None:
-            auto_captcha = parsed['ParsedResults'][0]['ParsedText']
-
-    return auto_captcha
-
-
-def _get_captcha_f1(browser,website:str,autocaptcha="") -> str:
+def _get_captcha_f1(browser,website:str,captcha_config={}) -> str:
     '''
     Getting captcha code of form1 and displaying it; requires user's input;
     browser: selenium.webdriver.chrome.webdriver.WebDriver (the output of '_set_browser');
     website: str, website address;
-    autocaptcha: str, API key from https://ocr.space/OCRAPI to guess captcha automatically, default '';
+    captcha_config: dict, info to get captcha automatically, default {};
     Returns str, an addition to the link with captcha code;
     '''
     page_with_code = website + "/modules.php?name=sud_delo&srv_num=1&name_op=sf&delo_id=1540005"
@@ -343,8 +359,8 @@ def _get_captcha_f1(browser,website:str,autocaptcha="") -> str:
             imgdata = base64.b64decode(imgstring)
 
             # checking if API key is present for autorecognition of captcha
-            if autocaptcha != "":
-                captcha_guessed = _get_autocaptcha(autocaptcha,imgstring)
+            if len(captcha_config) != 0:
+                captcha_guessed = captcha_solver(captcha_config,imgstring)
 
                 # failed (more than 5 symbols or no pattern with 5 numbers), enter captcha manually
                 if len(captcha_guessed) != 5 or re.search('\d{5}',captcha_guessed) == None:
@@ -376,7 +392,7 @@ def _get_captcha_f1(browser,website:str,autocaptcha="") -> str:
             
     return captcha_addition
 
-def _get_cases_texts_f1(website:str, region:str, start_date:str, end_date:str, path_to_driver:str, srv_num=['1'], path_to_save='', captcha=False, autocaptcha="") -> dict:
+def _get_cases_texts_f1(website:str, region:str, start_date:str, end_date:str, path_to_driver:str, srv_num=['1'], path_to_save='', captcha=False, captcha_config={}) -> dict:
     '''
     Getting all court cases on one website in the indicated date range
     website: str, website address;
@@ -388,8 +404,8 @@ def _get_cases_texts_f1(website:str, region:str, start_date:str, end_date:str, p
     path_to_driver: str, path to Chrome driver;
     srv_num: list, servers where to look for cases, default ['1']; one website can have multiple servers with criminal cases of the first instance;
     path_to_save: str, path where to save the results, default '' (the same directory of the script execution);
-    captcha: bool, if a website has captcha protection, default False; automatically checks if captcha is present, and if it's present: (1) a user will be asked to solve it or (2) if a user has API key from https://ocr.space/OCRAPI to guess captcha automatically, the captcha will be autorecognised;
-    autocaptcha: str, API key from https://ocr.space/OCRAPI to guess captcha automatically, default ''; 
+    captcha: bool, if a website has captcha protection, default False;
+    captcha_config: dict, info to get captcha automatically, default {}; keep default if entering captcha manually 
     Saves json files with all parsed cases per website's server (for example, if there are 2 servers on one website, there will be 2 json files); Logs errors and pages that were not parsed;
     Returns a dict with info about N cases found per server
     '''
@@ -415,7 +431,7 @@ def _get_cases_texts_f1(website:str, region:str, start_date:str, end_date:str, p
 
         # checking captcha
         if captcha == True:
-            captcha_addition = _get_captcha_f1(browser,website,autocaptcha)
+            captcha_addition = _get_captcha_f1(browser,website,captcha_config)
             link_to_site += captcha_addition
 
         # try to load the website content 3 times
@@ -490,7 +506,7 @@ def _get_cases_texts_f1(website:str, region:str, start_date:str, end_date:str, p
                                 # checking if session is expired when captcha is True
                                 if captcha == True and soup.find("div", {"id": "error"}):
                                     # getting new captcha
-                                    captcha_addition = _get_captcha_f1(browser,website,autocaptcha)
+                                    captcha_addition = _get_captcha_f1(browser,website,captcha_config)
                                     link_to_site = website + module_form1 + captcha_addition
                                     link_with_page = link_to_site + page_addition
                                     browser.get(link_with_page)
@@ -714,12 +730,12 @@ def _get_one_case_text_f2(soup) -> dict:
 
     return results
 
-def _get_captcha_f2(browser,website:str,autocaptcha="") -> str:
+def _get_captcha_f2(browser,website:str,captcha_config={}) -> str:
     '''
     Getting captcha code of form2 and displaying it; requires user's input;
     browser: selenium.webdriver.chrome.webdriver.WebDriver (the output of '_set_browser');
     website: str, website address;
-    autocaptcha: str, API key from https://ocr.space/OCRAPI to guess captcha automatically, default ''; 
+    captcha_config: dict, info to get captcha automatically, default {}; 
     Returns str, an addition to the link with captcha code;
     '''
     page_with_code = website + "/modules.php?name=sud_delo&name_op=sf&srv_num=1"
@@ -747,8 +763,8 @@ def _get_captcha_f2(browser,website:str,autocaptcha="") -> str:
             imgdata = base64.b64decode(imgstring)
 
             # checking if API key is present for autorecognition of captcha
-            if autocaptcha != "":
-                captcha_guessed = _get_autocaptcha(autocaptcha,imgstring)
+            if len(captcha_config) != 0:
+                captcha_guessed = captcha_solver(captcha_config,imgstring)
 
                 # failed (more than 5 symbols or no pattern with 5 numbers), enter captcha manually
                 if len(captcha_guessed) != 5 or re.search('\d{5}',captcha_guessed) == None:
@@ -781,7 +797,7 @@ def _get_captcha_f2(browser,website:str,autocaptcha="") -> str:
     return captcha_addition
 
 
-def _get_cases_texts_f2(browser, website:str, region:str, court_code:str, start_date:str, end_date:str, path_to_driver:str, srv_num=['1'], path_to_save='', captcha=False, autocaptcha="") -> dict:
+def _get_cases_texts_f2(browser, website:str, region:str, court_code:str, start_date:str, end_date:str, path_to_driver:str, srv_num=['1'], path_to_save='', captcha=False, captcha_config={}) -> dict:
     '''
     Getting all court cases on one website in the indicated date range
     browser: reusing browser for form2, because it has JavaScript and images on
@@ -795,8 +811,8 @@ def _get_cases_texts_f2(browser, website:str, region:str, court_code:str, start_
     path_to_driver: str, path to Chrome driver;
     srv_num: list, servers where to look for cases, default ['1']; one website can have multiple servers with criminal cases of the first instance;
     path_to_save: str, path where to save the results, default '' (the same directory of the script execution);
-    captcha: bool, if a website has captcha protection, default False; automatically checks if captcha is present, and if it's present: (1) a user will be asked to solve it or (2) if a user has API key from https://ocr.space/OCRAPI to guess captcha automatically, the captcha will be autorecognised;
-    autocaptcha: str, API key from https://ocr.space/OCRAPI to guess captcha automatically, default ''; 
+    captcha: bool, if a website has captcha protection, default False;
+    captcha_config: dict, info to get captcha automatically, default {};
     Saves json files with all parsed cases per website's server (for example, if there are 2 servers on one website, there will be 2 json files); Logs errors and pages that were not parsed;
     Returns a dict with info about N cases found per server
     '''
@@ -819,7 +835,7 @@ def _get_cases_texts_f2(browser, website:str, region:str, court_code:str, start_
 
         # checking captcha
         if captcha == True:
-            captcha_addition = _get_captcha_f2(browser,website,autocaptcha)
+            captcha_addition = _get_captcha_f2(browser,website,captcha_config)
             link_to_site += captcha_addition
 
         # try to load the website content 3 times
@@ -895,7 +911,7 @@ def _get_cases_texts_f2(browser, website:str, region:str, court_code:str, start_
                                 # check if it is because of captcha
                                 if el_found == False and captcha == True and BeautifulSoup(browser.page_source, 'html.parser').find("div", {"id": "error"}):
                                     # getting new captcha
-                                    captcha_addition = _get_captcha_f2(browser,website,autocaptcha)
+                                    captcha_addition = _get_captcha_f2(browser,website,captcha_config)
                                     link_to_site = website + module_form2 + captcha_addition
                                     link_with_page = link_to_site + page_addition
                                     browser.get(link_with_page)
@@ -990,10 +1006,596 @@ def _get_cases_texts_f2(browser, website:str, region:str, court_code:str, start_
 
     return return_dict
 
+### Functions to parse admin cases ###
 
-### The main parser function ###
+def _get_one_adm_case_text_f1(soup) -> dict:
+    '''
+    Takes a soup of a page with one admin case metadata
+    Returns a dict with case metadata and decision text if present
+    '''
 
-def get_cases(website:str, region:str, start_date:str, end_date:str, path_to_driver:str, court_code="", srv_num=['1'], path_to_save="", apikey=""):
+    results = {}
+    metadata = {}
+    results["case_text"] = ""
+    results["case_found"] = "True"
+    metadata["accused"] = []
+    metadata["id_text"] = ""
+
+    content = soup.find('div', {'class': 'contentt'})
+     
+    ### getting the internal case ID
+    id_text = soup.find('div', {'class': 'casenumber'})
+    if id_text != None:
+        metadata["id_text"] = id_text.text.replace('\n',"").replace('\t',"")
+
+    ### case decision text
+    ###
+    # checking tabs
+    tabs = soup.find("ul", class_="tabs").find_all("li")
+
+    for tab in tabs:
+        # getting the tab ID with the case text 
+        if " АКТЫ" in tab.text:
+            tab_id = tab.attrs['id'].replace('tab','cont')
+            results["case_text"] = content.find('div',{'id':tab_id}).text.replace('"','\'').replace('\xa0','')
+
+        ### accused info: names and articles
+        ###
+        if 'СТОРОНЫ' in tab.text:
+            accused_list = []
+            tab_id = tab.attrs['id'].replace('tab','cont')
+            accused_content = content.find('div',{'id':tab_id}).find_all('tr')
+            # account for multiple accused and multiple articles
+            for tr in accused_content[2:]:
+                accused_list.append({'name':tr.find_all('td')[1].text,\
+                                    'article':tr.find_all('td')[2].text.rstrip(' КоАП РФ').split(';')})
+            metadata["accused"] = accused_list
+        ###
+    ###
+
+    ### case metadata
+    ###
+    metadata_1 = content.find('div', {'id': 'cont1'})
+
+    for tr in metadata_1.find('table').find_all('tr'):
+        # another case identifier
+        if 'идентификатор' in tr.text:
+            metadata["uid_2"] = tr.find_all('td')[-1].text
+        # receipt date
+        if 'Дата поступления' in tr.text:
+            metadata["adm_date"] = tr.find_all('td')[-1].text
+        # judge
+        if 'Судья' in tr.text:
+            metadata["judge"] = tr.find_all('td')[-1].text
+        # case status
+        if 'Результат' in tr.text:
+            metadata["decision_result"] = tr.find_all('td')[-1].text
+    ###   
+
+    results["metadata"] = metadata
+
+    return results
+
+
+def _get_adm_cases_f1(website:str, region:str, start_date:str, end_date:str, adm_articles:list, path_to_driver:str, srv_num=['1'], path_to_save='', captcha=False, captcha_config={}) -> dict:
+    '''
+    Getting all admin court cases on one website in the indicated date range
+    website: str, website address;
+    region: str, region code;
+    Dates to indicate a date range in which to look for cases:
+    (for example, the range 01.01.2021 and 31.12.2021 will get all the cases registered in a court in 2021)
+        start_date: str, date of cases registration in a court, 'DD.MM.YYYY';
+        end_date: str, date of cases registration in a court, 'DD.MM.YYYY';
+    adm_articles: list, articles to search for, !NB the format should be the following: ['6.21_1','6.21_2','6.21.2_1'] (an example), where '6.21' is the article number according to the Administrative Code and the article part is given after an underscore; each article number should be followed by the according part; to query multiple parts of the same article, indicate them separately like the first two instances in the example above;
+    path_to_driver: str, path to Chrome driver;
+    srv_num: list, servers where to look for cases, default ['1']; one website can have multiple servers with criminal cases of the first instance;
+    path_to_save: str, path where to save the results, default '' (the same directory of the script execution);
+    captcha: bool, if a website has captcha protection, default False;
+    captcha_config: dict, info to get captcha automatically, default {}; keep default if entering captcha manually 
+    Saves json files with all parsed cases per website's server (for example, if there are 2 servers on one website, there will be 2 json files); Logs errors and pages that were not parsed;
+    Returns a dict with info about N cases found per server
+    '''
+
+    # turn off JavaScript and images for form1
+    browser = _set_browser(path_to_driver,imagesOff=True,javaScriptOff=True)
+
+    return_dict = {website:{"n_cases_by_server":{}}}
+
+    # making a list of articles for the URL
+    url_articles = ""
+    for a in adm_articles:
+        article_num, part = a.split('_')
+        url_articles += f"&lawbookarticles%5B%5D={article_num}+%F7.{part}"
+
+    # Iterating over servers
+    for server in srv_num:
+
+        results_per_site = {}
+        results_per_site[website] = {}
+        num_cases = 0
+        list_of_cases = []
+        logs = {}
+
+        module_form1 = f'/modules.php?name=sud_delo&srv_num={server}&name_op=r&delo_id=1500001&case_type=0&new=0&delo_table=adm_case&adm_case__ENTRY_DATE1D={start_date}&adm_case__ENTRY_DATE2D={end_date}&adm_parts__LAW_ARTICLESS={url_articles}'
+
+        link_to_site = website + module_form1
+
+        # checking captcha
+        if captcha == True:
+            captcha_addition = _get_captcha_f1(browser,website,captcha_config)
+            link_to_site += captcha_addition
+
+        # try to load the website content 3 times
+        tries = 0
+
+        while tries < 3:
+            try:
+                browser.get(link_to_site)
+                # explicitly waiting for the results table
+                el_found = _explicit_wait(browser,"ID","tablcont",6)
+
+                # if there is a table with results
+                if el_found == True:
+
+                    soup = BeautifulSoup(browser.page_source, 'html.parser')
+
+                    stats = _num_cases_pages_f1(soup)
+                    num_cases = stats[0]
+                    num_pages = stats[1]
+
+                    logs["cases_found"] = "True"
+                    logs["driver_error"] = "False"
+                    logs["pagination_error"] = []
+                    results_per_site[website]["num_cases"] = num_cases
+
+                    # getting cases on the first page
+                    # this will be all the cases for 1 page results
+                    # first, getting all the cases ids on the page
+                    cases_ids_on_page = _get_cases_ids_per_page_f1(soup)
+
+                    # iterating over cases and colecting texts
+                    for case_id in cases_ids_on_page:
+
+                        case_page = f"{website}/modules.php?name=sud_delo&srv_num={server}&name_op=case&{case_id}&delo_id=1500001"
+
+                        # trying to retrieve case content
+                        tries_case = 0
+                        while tries_case < 3:
+
+                            browser.get(case_page)
+                            tabs_content = _explicit_wait(browser,"CLASS_NAME","contentt",6)
+                            soup_case = BeautifulSoup(browser.page_source, 'html.parser')
+                            content = soup_case.find('div', {'class': 'contentt'})
+
+                            if content == None:
+
+                                results_per_case = {"case_text": "", "case_found": "False"}
+                                # failed, try again
+                                tries_case += 1
+                                continue
+
+                            else:
+                                # getting case data
+                                results_per_case = _get_one_adm_case_text_f1(soup_case)
+                                # success
+                                break
+
+                        results_per_case["case_id_uid"] = case_id
+                        list_of_cases.append(results_per_case)
+
+                    if num_pages > 1:
+
+                        for i in range(2,num_pages+1):
+                            page_addition = f'&page={i}'
+                            link_with_page = link_to_site + page_addition
+
+                            # adding Exception in case of the driver error
+                            try:
+                                browser.get(link_with_page)
+                                soup = BeautifulSoup(browser.page_source, 'html.parser')
+
+                                # checking if session is expired when captcha is True
+                                if captcha == True and soup.find("div", {"id": "error"}):
+                                    # getting new captcha
+                                    captcha_addition = _get_captcha_f1(browser,website,captcha_config)
+                                    link_to_site = website + module_form1 + captcha_addition
+                                    link_with_page = link_to_site + page_addition
+                                    browser.get(link_with_page)
+                                    soup = BeautifulSoup(browser.page_source, 'html.parser')
+
+                                # if there's no table content found
+                                if soup.find("table", {"id": "tablcont"}) == None:
+                                    logs['pagination_error'].append(i)
+
+                                # if everything's ok
+                                if soup.find("table", {"id": "tablcont"}):
+
+                                    cases_ids_on_page = _get_cases_ids_per_page_f1(soup)
+
+                                    for case_id in cases_ids_on_page:
+                                        case_page = f"{website}/modules.php?name=sud_delo&srv_num={server}&name_op=case&{case_id}&delo_id=1500001"
+
+                                        # trying to retrieve case content
+                                        tries_case = 0
+                                        while tries_case < 3:
+
+                                            browser.get(case_page)
+                                            tabs_content = _explicit_wait(browser,"CLASS_NAME","contentt",6)
+                                            soup_case = BeautifulSoup(browser.page_source, 'html.parser')
+                                            content = soup_case.find('div', {'class': 'contentt'})
+
+                                            if content == None:
+
+                                                results_per_case = {"case_text": "", "case_found": "False"}
+                                                # failed, try again
+                                                tries_case += 1
+                                                continue
+
+                                            else:
+                                                # getting case data
+                                                results_per_case = _get_one_adm_case_text_f1(soup_case)
+                                                # success
+                                                break
+
+                                        results_per_case["case_id_uid"] = case_id
+                                        list_of_cases.append(results_per_case)
+
+                            except WebDriverException:
+                                # recording the N of page that couldn't be loaded
+                                logs["driver_error"] = "True"
+                                logs["pagination_error"].append(i)
+                                # continue to the next page
+                                continue
+
+                    # saving data                
+                    results_per_site[website]["cases"] = list_of_cases
+                    results_per_site[website]["logs"] = logs
+
+                    # results are saved, stop trying, break the while loop
+                    break
+
+                # no cases found (no results or error)
+                else:
+                    tries += 1
+
+                    logs["cases_found"] = "False"
+                    logs["driver_error"] = "False"
+                    logs["pagination_error"] = []
+                    results_per_site[website]["num_cases"] = num_cases
+                    results_per_site[website]["cases"] = list_of_cases
+                    results_per_site[website]["logs"] = logs
+                    
+                    #try again
+                    continue
+
+
+            except WebDriverException:
+                tries += 1
+
+                logs["cases_found"] = "False"
+                logs["driver_error"] = "True"
+                logs["pagination_error"] = []
+                results_per_site[website]["num_cases"] = num_cases
+                results_per_site[website]["cases"] = list_of_cases
+                results_per_site[website]["logs"] = logs
+
+                #try again
+                continue
+
+        file_name = f"{path_to_save}{region}_{website.replace('http://','').replace('.sudrf.ru','').replace('.','_').replace('/','')}_{server}_{start_date.replace('.','_')}_{end_date.replace('.','_')}.json"
+
+        with open(file_name, 'w') as jf:
+            json.dump(results_per_site, jf, ensure_ascii=False)
+
+        return_dict[website]["n_cases_by_server"][server] = num_cases
+
+    browser.close()
+
+    return return_dict
+
+def _get_one_adm_case_text_f2(soup) -> dict:
+    '''
+    Takes a soup of a page with one admin case metadata
+    Returns a dict with case metadata and decision text if present
+    '''
+
+    results = {}
+    metadata = {}
+    results["case_text"] = ""
+    metadata["accused"] = []
+
+    content = soup.find('div', {'id': 'search_results'})
+
+    ### checking if the internal case ID is present 
+    ### 
+    id_text = soup.find('div', {'class': 'case-num'})
+    if id_text != None:
+        metadata["id_text"] = id_text.text.replace('\n',"").replace('\t',"")
+    else:
+        metadata["id_text"] = ""
+    ###
+    
+    ### checking if there's any content
+    ###
+    if content != None:
+        
+        results["case_found"] = "True"
+
+        # checking tabs
+        tabs = soup.find("ul", id="case_bookmarks").find_all("li")
+        
+        for tab in tabs:
+            ### case decision text
+            if "Судебны" in tab.text:
+                tab_id = tab.attrs['id'].replace('id','content')
+                results["case_text"] = content.find('div',{'id':tab_id}).text.replace('"','\'').replace('\xa0','')
+
+            ### accused info
+            if "Стороны" in tab.text:
+                accused_list = []
+                tab_id = tab.attrs['id'].replace('id','content')
+                accused_content = content.find('div',{'id':tab_id})
+                for tr in accused_content.find('table').find_all('tr')[1:]:
+                    name = tr.find_all('td')[1].text
+                    article = []
+                    for td in tr.find_all('td'):
+                        if 'КоАП РФ' in td.text:
+                            article.extend(td.text.rstrip(' КоАП РФ').split(';'))
+
+                    accused_list.append({'name':name, 'article':article})
+
+                metadata["accused"] = accused_list
+        ###
+
+        ### case metadata
+        ###
+        case_metadata = content.find('table', {'class':'law-case-table'})
+        
+        if case_metadata != None:
+    
+            for tr in case_metadata.find_all('tr'):
+                # another case identifier
+                if 'идентификатор' in tr.text:
+                    metadata["uid_2"] = tr.find_all('td')[-1].text
+                # receipt date
+                if 'Дата поступления' in tr.text:
+                    metadata["adm_date"] = tr.find_all('td')[-1].text
+                # judge
+                if 'Судья' in tr.text:
+                    metadata["judge"] = tr.find_all('td')[-1].text
+                # case status
+                if 'Результат' in tr.text:
+                    metadata["decision_result"] = tr.find_all('td')[-1].text
+            ###   
+
+        results["metadata"] = metadata
+        
+    else:
+        results["case_found"] = "False"
+
+    return results
+
+def _get_adm_cases_f2(browser, website:str, region:str, court_code:str, start_date:str, end_date:str, adm_articles:list, path_to_driver:str, srv_num=['1'], path_to_save='', captcha=False, captcha_config={}) -> dict:
+    '''
+    Getting all admin court cases on one website in the indicated date range
+    browser: reusing browser for form2, because it has JavaScript and images on
+    website: str, website address;
+    region: str, region code; 
+    court_code: str, required for form2 websites; to retrieve the codes, use 'https://raw.githubusercontent.com/dataout-org/sudrfparser/main/courts_info/sudrf_websites.json';
+    Dates to indicate a date range in which to look for cases:
+    (for example, the range 01.01.2021 and 31.12.2021 will get all the cases registered in a court in 2021)
+        start_date: str, date of cases registration in a court, 'DD.MM.YYYY';
+        end_date: str, date of cases registration in a court, 'DD.MM.YYYY';
+    adm_articles: list, articles to search for, !NB the format should be the following: ['6.21_1','6.21_2','6.21.2_1'] (an example), where '6.21' is the article number according to the Administrative Code and the article part is given after an underscore; each article number should be followed by the according part; to query multiple parts of the same article, indicate them separately like the first two instances in the example above;
+    path_to_driver: str, path to Chrome driver;
+    srv_num: list, servers where to look for cases, default ['1']; one website can have multiple servers with criminal cases of the first instance;
+    path_to_save: str, path where to save the results, default '' (the same directory of the script execution);
+    captcha: bool, if a website has captcha protection, default False;
+    captcha_config: dict, info to get captcha automatically, default {};
+    Saves json files with all parsed cases per website's server (for example, if there are 2 servers on one website, there will be 2 json files); Logs errors and pages that were not parsed;
+    Returns a dict with info about N cases found per server
+    '''
+
+    return_dict = {website:{"n_cases_by_server":{}}}
+
+    # making a list of articles for the URL
+    url_articles = ""
+    for a in adm_articles:
+        article_num, part = a.split('_')
+        url_articles += f"&lawbookarticles%5B%5D={article_num}+%F7.{part}"
+
+    for server in srv_num:
+
+        results_per_site = {}
+        results_per_site[website] = {}
+        num_cases = 0
+        list_of_cases = []
+        logs = {}
+
+        # case__num_build coincides with server num
+        module_form2 = f"/modules.php?name_op=r&name=sud_delo&srv_num={server}&_deloId=1500001&case__case_type=0&_new=0&case__vnkod={court_code}&case__num_build={server}&case__case_numberss=&case__judicial_uidss=&parts__namess=&case__entry_date1d={start_date}&case__entry_date2d={end_date}&parts__law_articless={url_articles}"
+
+        link_to_site = website + module_form2
+
+        # checking captcha
+        if captcha == True:
+            captcha_addition = _get_captcha_f2(browser,website,captcha_config)
+            link_to_site += captcha_addition
+
+        # try to load the website content 3 times
+        tries = 0
+
+        while tries < 3:
+            try:
+                browser.get(link_to_site)
+                # explicitly waiting for the results table
+                el_found = _explicit_wait(browser,"ID","resultTable",6)
+
+                # if there is a table with results
+                if el_found == True:
+
+                    soup = BeautifulSoup(browser.page_source, 'html.parser')
+
+                    stats = _num_cases_pages_f2(soup)
+                    num_cases = stats[0]
+                    num_pages = stats[1]
+
+                    logs["cases_found"] = "True"
+                    logs["driver_error"] = "False"
+                    logs["pagination_error"] = []
+                    results_per_site[website]["num_cases"] = num_cases
+
+                    # getting cases on the first page
+                    # this will be all the cases for 1 page results
+                    # first, getting all the cases ids on the page
+                    cases_ids_on_page = _get_cases_ids_per_page_f2(soup)
+
+                    # iterating over cases and colecting texts
+                    for case_id in cases_ids_on_page:
+
+                        case_page = f"{website}/modules.php?name=sud_delo&name_op=case&{case_id}&_deloId=1500001&_caseType=0&_new=0&srv_num={server}"
+                        
+                        # trying to retrieve case content
+                        tries_case = 0
+                        while tries_case <= 3:
+
+                            browser.get(case_page)
+                            # checking if tabs are loaded
+                            tabs_content = _explicit_wait(browser,"ID","case_bookmarks",6)
+                            soup_case = BeautifulSoup(browser.page_source, 'html.parser')
+                            content = soup_case.find('ul', {'class': 'bookmarks'})
+
+                            if content == None:
+                                results_per_case = {"case_text": "", "case_found": "False"}
+                                # failed, try again
+                                tries_case += 1
+                                continue
+
+                            else:
+                                # getting case data
+                                results_per_case = _get_one_adm_case_text_f2(soup_case)
+                                # success
+                                break
+
+                        results_per_case["case_id_uid"] = case_id
+                        list_of_cases.append(results_per_case)
+
+                    if num_pages > 1:
+
+                        for i in range(2,num_pages+1):
+                            page_addition = f'&_page={i}'
+                            link_with_page = link_to_site + page_addition
+
+                            # adding Exception in case of the driver error
+                            try:
+                                browser.get(link_with_page)
+                                el_found = _explicit_wait(browser,"ID","resultTable",6)
+                                
+                                # if there's no table content found
+                                # check if it is because of captcha
+                                if el_found == False and captcha == True and BeautifulSoup(browser.page_source, 'html.parser').find("div", {"id": "error"}):
+                                    # getting new captcha
+                                    captcha_addition = _get_captcha_f2(browser,website,captcha_config)
+                                    link_to_site = website + module_form2 + captcha_addition
+                                    link_with_page = link_to_site + page_addition
+                                    browser.get(link_with_page)
+                                    # trying one more time
+                                    el_found = _explicit_wait(browser,"ID","resultTable", 6)
+
+                                if el_found == False:
+                                    logs['pagination_error'].append(i)
+                                
+                                # if everything's ok
+                                if el_found == True:
+                                    soup = BeautifulSoup(browser.page_source, 'html.parser')
+                                    cases_ids_on_page = _get_cases_ids_per_page_f2(soup)
+
+                                    # iterating over cases and colecting texts
+                                    for case_id in cases_ids_on_page:
+
+                                        case_page = f"{website}/modules.php?name=sud_delo&name_op=case&{case_id}&_deloId=1500001&_caseType=0&_new=0&srv_num={server}"
+
+                                        tries_case = 0
+                                        while tries_case <= 3:
+
+                                            browser.get(case_page)
+                                            # checking if tabs are loaded
+                                            tabs_content = _explicit_wait(browser,"ID","case_bookmarks",6)
+                                            soup_case = BeautifulSoup(browser.page_source, 'html.parser')
+                                            content = soup_case.find('ul', {'class': 'bookmarks'})
+
+                                            if content == None:
+                                                results_per_case = {"case_text": "", "case_found": "False"}
+                                                # failed, try again
+                                                tries_case += 1
+                                                continue
+  
+                                            else:
+                                                # getting case data
+                                                results_per_case = _get_one_adm_case_text_f2(soup_case)
+                                                # success
+                                                break
+
+                                        results_per_case["case_id_uid"] = case_id
+                                        list_of_cases.append(results_per_case)
+
+                            except WebDriverException:
+                                # recording the N of page that couldn't be loaded
+                                logs["driver_error"] = "True"
+                                logs["pagination_error"].append(i)
+                                # continue to the next page
+                                continue
+
+                    # saving data                
+                    results_per_site[website]["cases"] = list_of_cases
+                    results_per_site[website]["logs"] = logs
+
+                    # results are saved, stop trying, break the while loop
+                    break
+
+                # no cases found (no results, error, or time out)
+                else:
+                    tries += 1
+
+                    logs["cases_found"] = "False"
+                    logs["driver_error"] = "False"
+                    logs["pagination_error"] = []
+                    results_per_site[website]["num_cases"] = num_cases
+                    results_per_site[website]["cases"] = list_of_cases
+                    results_per_site[website]["logs"] = logs
+
+                    #try again
+                    continue
+                    
+
+            except WebDriverException:
+                tries += 1
+
+                logs["cases_found"] = "False"
+                logs["driver_error"] = "True"
+                logs["pagination_error"] = []
+                results_per_site[website]["num_cases"] = num_cases
+                results_per_site[website]["cases"] = list_of_cases
+                results_per_site[website]["logs"] = logs
+
+                #try again
+                continue
+
+        file_name = f"{path_to_save}{region}_{website.replace('http://','').replace('.sudrf.ru','').replace('.','_').replace('/','')}_{server}_{start_date.replace('.','_')}_{end_date.replace('.','_')}.json"
+        
+        with open(file_name, 'w') as jf:
+            json.dump(results_per_site, jf, ensure_ascii=False)
+
+        return_dict[website]["n_cases_by_server"][server] = num_cases
+
+    return return_dict
+
+
+### MAIN PARSER FUNCTIONS ###
+
+# criminal cases #
+
+def get_cases(website:str, region:str, start_date:str, end_date:str, path_to_driver:str, court_code="", srv_num=['1'], path_to_save="", captcha_config={}):
     '''
     Getting texts of court decisions with metadata on one website for the indicated date range
     region: str, region code; use keys in 'https://github.com/dataout-org/sudrfparser/blob/main/courts_info/sudrf_websites.json'
@@ -1005,7 +1607,7 @@ def get_cases(website:str, region:str, start_date:str, end_date:str, path_to_dri
     court_code: str, required for form2 websites; to retrieve the codes, use 'https://raw.githubusercontent.com/dataout-org/sudrfparser/main/courts_info/sudrf_websites.json'; default '';
     srv_num: list, servers where to look for cases, default ['1']; one website can have multiple servers with criminal cases of the first instance;
     path_to_save: str, path where to save the results, default '' (the same directory of the script execution; note that there can be a lot of large json files);
-    apikey: str, API key for autorecognition of captcha from https://ocr.space/OCRAPI; default ''; keep default if entering captcha manually;
+    captcha_config: dict, info to get captcha automatically, default {}; keep default if entering captcha manually;
     Saves json files with all parsed cases per website's server (for example, if there are 2 servers on one website, there will be 2 json files); Logs errors and pages that were not parsed;
     Returns a dict with info about N cases found per server (if parsed successfully); returns a status str if parsing is failed;
     '''
@@ -1040,14 +1642,14 @@ def get_cases(website:str, region:str, start_date:str, end_date:str, path_to_dri
                     results = _get_cases_texts_f1(website, region, start_date, end_date, path_to_driver, srv_num, path_to_save)
 
                 if form_type == "form1" and captcha == "True":
-                    results = _get_cases_texts_f1(website, region, start_date, end_date, path_to_driver, srv_num, path_to_save, captcha=True, autocaptcha=apikey)
+                    results = _get_cases_texts_f1(website, region, start_date, end_date, path_to_driver, srv_num, path_to_save, True, captcha_config)
 
                 # parser for form2
                 if form_type == "form2" and captcha == "False":
                     results = _get_cases_texts_f2(browser, website, region, court_code, start_date, end_date, path_to_driver, srv_num, path_to_save)
 
                 if form_type == "form2" and captcha == "True":
-                    results = _get_cases_texts_f2(browser, website, region, court_code, start_date, end_date, path_to_driver, srv_num, path_to_save, captcha=True, autocaptcha=apikey)
+                    results = _get_cases_texts_f2(browser, website, region, court_code, start_date, end_date, path_to_driver, srv_num, path_to_save, True, captcha_config)
 
                 # no point in trying because websites with other forms are not parsed
                 if form_type == "other":
@@ -1067,6 +1669,90 @@ def get_cases(website:str, region:str, start_date:str, end_date:str, path_to_dri
             continue
 
     # give up if conent is still not loaded after 3 tries
+    if content_found == False:
+        results = f"Failed to load content of {website}"
+    
+    browser.close()
+    
+    return results
+
+# administrative cases #
+
+def get_adm_cases(website:str, region:str, adm_articles:list, start_date:str, end_date:str, path_to_driver:str, court_code="", srv_num=['1'], path_to_save="", captcha_config={}):
+    '''
+    Getting texts of administrative court cases with metadata on one website for the indicated date range
+    region: str, region code; use keys in 'https://github.com/dataout-org/sudrfparser/blob/main/courts_info/sudrf_websites.json'
+    adm_articles: list, articles to search for, !NB the format should be the following: ['6.21_1','6.21_2','6.21.2_1'] (an example), where '6.21' is the article number according to the Administrative Code and the article part is given after an underscore; each article number should be followed by the according part; to query multiple parts of the same article, indicate them separately like the first two instances in the example above;
+    Dates to indicate a date range in which to look for cases:
+    (for example, the range 01.01.2021 and 31.12.2021 will get all the cases registered in a court in 2021)
+        start_date: str, date of cases registration in a court, 'DD.MM.YYYY';
+        end_date: str, date of cases registration in a court, 'DD.MM.YYYY';
+    path_to_driver: str, path to Chrome driver;
+    court_code: str, required for form2 websites; to retrieve the codes, use 'https://raw.githubusercontent.com/dataout-org/sudrfparser/main/courts_info/sudrf_websites.json'; default '';
+    srv_num: list, servers where to look for cases, default ['1']; one website can have multiple servers with criminal cases of the first instance;
+    path_to_save: str, path where to save the results, default '' (the same directory of the script execution; note that there can be a lot of large json files);
+    captcha_config: dict, info to get captcha automatically, default {}; keep default if entering captcha manually;
+    Saves json files with all parsed cases per website's server (for example, if there are 2 servers on one website, there will be 2 json files); Logs errors and pages that were not parsed;
+    Returns a dict with info about N cases found per server (if parsed successfully); returns a status str if parsing is failed;
+    '''
+
+    # request the website soup
+    # feed soup to check captcha and form
+
+    browser = _set_browser(path_to_driver)
+    link_to_site = website + "/modules.php?name=sud_delo&srv_num=1&name_op=sf&delo_id=1540005"
+
+    # try to load the website content 3 times
+    tries = 0
+    content_found = False
+
+    while tries < 3:
+        try:
+            browser.get(link_to_site)
+            content_found = _explicit_wait(browser,"ID","modSdpContent",6)
+            # additional time if explicit wait fails
+            time.sleep(3)
+
+            if content_found == True:
+
+                soup = BeautifulSoup(browser.page_source, 'html.parser')
+
+                form_and_captcha = _check_form_and_captcha(soup)
+                form_type = form_and_captcha["form_type"]
+                captcha = form_and_captcha["captcha"]
+
+                # parser for form1
+                if form_type == "form1" and captcha == "False":
+                    results = _get_adm_cases_f1(website, region, start_date, end_date, adm_articles, path_to_driver, srv_num, path_to_save)
+
+                if form_type == "form1" and captcha == "True":
+                    results = _get_adm_cases_f1(website, region, start_date, end_date, adm_articles, path_to_driver, srv_num, path_to_save, True, captcha_config)
+
+                # parser for form2
+                if form_type == "form2" and captcha == "False":
+                    results = _get_adm_cases_f2(browser, website, region, court_code, start_date, end_date, adm_articles, path_to_driver, srv_num, path_to_save)
+
+                if form_type == "form2" and captcha == "True":
+                    results = _get_adm_cases_f2(browser, website, region, court_code, start_date, end_date, adm_articles,path_to_driver, srv_num, path_to_save, True, captcha_config)
+
+                # no point in trying because websites with other forms are not parsed
+                if form_type == "other":
+                    results = f"{website} cannot be parsed"
+
+                # succesful, stop trying
+                break
+
+            # no web driver error, but content was not loaded
+            else:
+                tries += 1
+                continue
+
+        # web driver error, try again
+        except WebDriverException:
+            tries += 1
+            continue
+
+    # give up if content is still not loaded after 3 tries
     if content_found == False:
         results = f"Failed to load content of {website}"
     
@@ -1104,7 +1790,7 @@ def _get_missing_pages(dir_path:str,region_code:str,year:str) -> tuple:
     return (n_missed_pages,sites_with_pagination_errors)
 
 
-def request_missing_pages(dir_path:str,region_code:str,year:str,path_to_driver:str,apikey="") -> list:
+def request_missing_pages(dir_path:str,region_code:str,year:str,path_to_driver:str,captcha_config={}) -> list:
     '''
     Handling missing pages by region and year: checking whether the result json files have missing pages and requesting cases on them;
     This function adds missing cases to the same resulting file (it overwrites files);
@@ -1113,7 +1799,7 @@ def request_missing_pages(dir_path:str,region_code:str,year:str,path_to_driver:s
     year: str, year in the results json files, for which to check missing pages;
     (for example, the file '50_chehov_mo_1_2019.json' has the region code '50' and the year is '2019')
     path_to_driver: str, path to Chrome driver;
-    apikey: str, API key for autorecognition of captcha from https://ocr.space/OCRAPI; default ''; keep default if entering captcha manually
+    captcha_config: dict, info to get captcha automatically, default {}; keep default if entering captcha manually
     Returns a list with logs of N cases added per file
     '''
 
@@ -1160,7 +1846,7 @@ def request_missing_pages(dir_path:str,region_code:str,year:str,path_to_driver:s
 
                 # check captcha
                 if captcha == "True":
-                    captcha_addition = _get_captcha_f1(browser,website,apikey)
+                    captcha_addition = _get_captcha_f1(browser,website,captcha_config)
                     link_to_site += captcha_addition
                 
                 # collecting cases IDs per page
@@ -1219,7 +1905,7 @@ def request_missing_pages(dir_path:str,region_code:str,year:str,path_to_driver:s
 
                 # checking captcha
                 if captcha == "True":
-                    captcha_addition = _get_captcha_f2(browser,website,apikey)
+                    captcha_addition = _get_captcha_f2(browser,website,captcha_config)
                     link_to_site += captcha_addition
 
                 # collecting cases IDs per page
