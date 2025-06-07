@@ -565,18 +565,20 @@ def _get_cases_texts_f1(website:str, region:str, start_date:str, end_date:str, p
 
                 # no cases found (no results or error)
                 else:
-                    tries += 1
-
                     logs["cases_found"] = "False"
                     logs["driver_error"] = "False"
                     logs["pagination_error"] = []
                     results_per_site[website]["num_cases"] = num_cases
                     results_per_site[website]["cases"] = list_of_cases
                     results_per_site[website]["logs"] = logs
-                    
-                    #try again
-                    continue
 
+                    if "Данных по запросу" in browser.find_element_by_id('error').text:
+                        # no cases found
+                        break
+                    else:
+                        #try again
+                        tries += 1
+                        continue
 
             except WebDriverException:
                 tries += 1
@@ -1256,18 +1258,20 @@ def _get_adm_cases_f1(website:str, region:str, start_date:str, end_date:str, adm
 
                 # no cases found (no results or error)
                 else:
-                    tries += 1
-
                     logs["cases_found"] = "False"
                     logs["driver_error"] = "False"
                     logs["pagination_error"] = []
                     results_per_site[website]["num_cases"] = num_cases
                     results_per_site[website]["cases"] = list_of_cases
                     results_per_site[website]["logs"] = logs
-                    
-                    #try again
-                    continue
 
+                    if "Данных по запросу" in browser.find_element_by_id('error').text:
+                        # no cases found
+                        break
+                    else:
+                        #try again
+                        tries += 1
+                        continue
 
             except WebDriverException:
                 tries += 1
