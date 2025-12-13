@@ -56,6 +56,11 @@ def _set_browser(path_to_driver:str,imagesOff=False,javaScriptOff=False):
     chrome_options.add_argument("--ignore-certificate-errors")
     chrome_options.add_argument("--allow-running-insecure-content")
     chrome_options.add_argument("--disable-web-security")
+    # headless mode – **this is what hides the window**
+    chrome_options.add_argument("--headless=new")  # or "--headless" if older Chrome
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
     ### manipulating the browser window
     chrome_options.add_argument("--window-size=700,1200")
     chrome_options.add_argument("--window-position=2300,0")
